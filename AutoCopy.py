@@ -1,10 +1,13 @@
 import sys
 import os
+import socket
 import subprocess
 import argparse
 from pexpect import popen_spawn, EOF
+from datetime import datetime
 from watchdog.observers import Observer
 from watchdog.events import PatternMatchingEventHandler
+from ssh2.session import Session
 from time import sleep
 
 class AutoCopier:
@@ -76,6 +79,7 @@ class Handler(PatternMatchingEventHandler):
         self.most_recent_path = ""
         self.basename = basename
         self.dest = dest
+        self.sm = SessionManager()
 
         PatternMatchingEventHandler.__init__(self, patterns, ignore_patterns)
 
@@ -135,34 +139,78 @@ class Handler(PatternMatchingEventHandler):
 
     def copy_file(self, source_path, dest_path, rel_path):
 
-        cmd = "scp %s %s%s" % (source_path, dest_path, rel_path)
-        # child = popen_spawn.PopenSpawn(cmd, encoding='utf-8')
-        # # child.delaybeforesend = 1
-        # # res1 = child.expect('assword:', timeout=None)
-        #
-        #
-        # # if res1 == 0: print("Matched password prompt")
-        #
-        # # child.sendline('maker')
-        #
-        # child.expect(EOF)
-        # res = child.expect(["No such file or directory", "100%"], timeout=30)
-        # if res == 0:
-        #     print("File transfer failed\n")
-        #     child.kill(0)
-        #
-        # elif res == 1:
-        #     print("File transfer succeeded\n")
-        #
-        # print(child.before)
-        # print(child.after)
-        # child.logfile = sys.stdout
+        cmd = "scp %s %s%s\n" % (source_path, dest_path, rel_path)
+        print(cmd)
 
-        pscp_path = "C:\Program Files\PuTTY\pscp.exe"
-        dest_full_path = dest_path + rel_path
-        subprocess.call([pscp_path, "-sftp", "-pw", "maker", source_path,
-                         dest_full_path])
+        # ------------------------------------------------
+        # ------------------------- With PSCP ------------
+        # ------------------------------------------------
 
+        # pscp_path = "C:\Program Files\PuTTY\pscp.exe"
+        # dest_full_path = dest_path + rel_path
+        # subprocess.call([pscp_path, "-sftp", "-pw", "maker", source_path,
+        #                  dest_full_path])
+
+        # ------------------------------------------------
+        # --------------------- With SSH2 ----------------
+        # ------------------------------------------------
+
+        self.sm.scp(source_path, dest_path + rel_path)
+
+
+
+class SessionManager:
+    """Opens an SSH session"""
+
+    def __init__(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect(("ev3dev", 22))
+
+        self.session = Session()
+        self.session.handshake(sock)
+        self.session.userauth_password("robot", "maker")
+        self.session.keepalive_config(True, 60)
+
+    def run_remote_cmd(self, cmd):
+        chan = self.session.open_session()
+        chan.execute(cmd)
+
+        # Read output
+        output = ""
+        size, data = chan.read()
+        while size > 0:
+            output += data.decode('utf-8')
+            print(data.decode('utf-8'))
+            size, data = chan.read()
+
+        sig, err, lang_tag = chan.get_exit_signal()
+        print(err.decode('utf-8'))
+
+        chan.close()
+
+        return sig, output
+
+    def scp(self, src_path, dest_path):
+
+        fileinfo = os.stat(src_path)
+
+        chan = self.session.scp_send64(dest_path, fileinfo.st_mode & 0o777, fileinfo.st_size,
+                                fileinfo.st_mtime, fileinfo.st_atime)
+
+        # Output Stats
+        now = datetime.now()
+        with open(src_path, 'rb') as local_fh:
+            for data in local_fh:
+                chan.write(data)
+        taken = datetime.now() - now
+        rate = (fileinfo.st_size / 1024000.0) / taken.total_seconds()
+        print("Finished writing %s to remote in %s |  %.4f. MB/s" %
+              (dest_path, taken, rate))
+
+        chan.close()
+
+    def disconnect(self):
+        self.session.disconnect()
 
 
 if __name__ == "__main__":
